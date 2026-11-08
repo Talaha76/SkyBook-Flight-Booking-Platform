@@ -1,200 +1,631 @@
-# SkyBook: Flight Booking Microservices
+<div align="center">
 
-A flight-booking back end built as **six Node.js/TypeScript microservices** that talk over **Apache Kafka**, plus a **Kafka → AWS SQS bridge**.
-Each service has its own **PostgreSQL** database, flight search is cached in **Redis**, and the stack runs
-locally with **Docker Compose**, including **Prometheus/Grafana** monitoring. It deploys to Kubernetes with a **Helm** chart and has an
-**AWS CDK blueprint** (MSK, RDS, ElastiCache, EKS, SQS, WAF) with a cost estimate.
+# SkyBook — Flight Booking Microservices
 
-It covers the patterns that matter in real booking systems: an **idempotent booking API**, a
-**transactional outbox**, a **choreographed saga with compensation**, **duplicate-safe consumers**,
-**overbooking prevention** (pessimistic and optimistic locking), **cache-aside with stampede protection and
-event-driven invalidation**, and **retry topics with a dead-letter queue and replay tool**.
+**Event-Driven Flight Search & Booking Platform with Kafka Sagas, Idempotent APIs, and an AWS SQS Bridge**
 
-> Every number in this README and in `docs/` was measured. See **[docs/results-2026-11-07.md](docs/results-2026-11-07.md)** (owner's machine + real AWS SQS)
-> and [docs/benchmarks.md](docs/benchmarks.md) (development runs).
+[![Node.js](https://img.shields.io/badge/Node.js-22-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![Apache Kafka](https://img.shields.io/badge/Apache_Kafka-KRaft-231F20?logo=apachekafka&logoColor=white)](https://kafka.apache.org/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+[![Redis](https://img.shields.io/badge/Redis-Cache-DC382D?logo=redis&logoColor=white)](https://redis.io/)
+[![AWS SQS](https://img.shields.io/badge/AWS-SQS_%7C_CDK-FF9900?logo=amazonaws&logoColor=white)](https://aws.amazon.com/sqs/)
+[![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
+[![Kubernetes](https://img.shields.io/badge/Kubernetes-Helm-326CE5?logo=kubernetes&logoColor=white)](https://kubernetes.io/)
+[![Prometheus](https://img.shields.io/badge/Prometheus-Metrics-E6522C?logo=prometheus&logoColor=white)](https://prometheus.io/)
+[![Grafana](https://img.shields.io/badge/Grafana-Dashboards-F46800?logo=grafana&logoColor=white)](https://grafana.com/)
 
-## Headline results (measured)
+**Run locally:** `docker compose up --build -d` → API + Swagger at `http://localhost:8080/docs`
 
-| What | Result |
+</div>
+
+
+## Table of Contents
+
+- [Measured Results](#measured-results)
+- [Screenshots](#screenshots)
+- [Key Features](#key-features)
+- [System Architecture](#system-architecture)
+- [Booking Saga](#booking-saga)
+- [Technology Stack](#technology-stack)
+- [Repository Structure](#repository-structure)
+- [Local Development](#local-development)
+  - [1. Clone the Repository](#1-clone-the-repository)
+  - [2. Start the Stack](#2-start-the-stack)
+  - [3. Verify Everything Works](#3-verify-everything-works)
+- [Try the API](#try-the-api)
+- [Idempotent Booking Flow](#idempotent-booking-flow)
+- [Search & Caching Flow](#search--caching-flow)
+- [Reliability Patterns](#reliability-patterns)
+- [Kafka → AWS SQS Bridge](#kafka--aws-sqs-bridge)
+- [Kubernetes Deployment](#kubernetes-deployment)
+- [AWS Production Blueprint](#aws-production-blueprint)
+- [API Overview](#api-overview)
+- [Monitoring](#monitoring)
+- [Benchmarks](#benchmarks)
+- [Testing](#testing)
+- [Configuration](#configuration)
+- [Design Notes](#design-notes)
+- [Limitations](#limitations)
+- [Future Improvements](#future-improvements)
+- [Project Goal](#project-goal)
+
+---
+
+SkyBook is a flight-booking back end built as **Node.js/TypeScript microservices** that communicate through **Apache Kafka**. Every service owns its own **PostgreSQL** database, flight search is cached in **Redis**, and bookings run through a **choreographed saga** that holds a seat, charges a (mock) payment, and automatically **releases the seat when payment fails**.
+
+The project focuses on the problems real booking systems have to solve: duplicate requests, overbooking, lost events, partial failures, traffic spikes, and integrating on-premises event streams with **AWS-native services**.
+
+> **Portfolio project:** SkyBook demonstrates microservice architecture, idempotent REST APIs, the transactional outbox pattern, sagas with compensation, duplicate-safe consumers, query tuning, cache invalidation, retry/dead-letter queues, a Kafka → Amazon SQS bridge, Kubernetes deployment, and Prometheus/Grafana monitoring — with **every number below measured, not estimated**.
+
+## Measured Results
+
+All results were produced by the project's own test and benchmark scripts (`scripts/run-benchmarks.ps1`, the bridge outage test, and the e2e suite) on a Windows + Docker Desktop machine (8 vCPU), with the bridge running against **real Amazon SQS**. Full details: [`docs/results-2026-11-07.md`](docs/results-2026-11-07.md).
+
+| What was measured | Result |
 |---|---|
-| Flight search, 1M rows, k6 p95 | **1,021 ms → 28 ms** with a composite index → **25.5 ms** with Redis (89 % hit rate, 1,641 req/s) |
-| Idempotency, 100 identical concurrent requests | **1 booking, 0 duplicates** |
-| 10× booking spike (5/s → 50/s) | 3,575 bookings, 17,875 events, **0 lost**, 0 % errors, consumers caught up in 161 s |
-| Kafka → **real Amazon SQS**, 2-minute network outage | **1,200 / 1,200 events delivered**, backlog drained in 21 s |
-| Overbooking, 200 concurrent holds on 150 seats | exactly **150 held / 50 rejected** (pessimistic and optimistic locking) |
-| Kubernetes (kind + Helm) | 13 pods Running, **e2e 23/23 passed** against the cluster |
+| Flight search on **1,000,000** flights (k6, p95) | **1,021 ms → 28 ms** with a composite index → **25.5 ms** with Redis (**89% hit rate**, 1,641 req/s) |
+| `EXPLAIN ANALYZE` (single query, p95) | **73.3 ms → 0.28 ms** (sequential scan → index scan) |
+| 100 identical concurrent booking requests (one `Idempotency-Key`) | **1 booking, 0 duplicates** |
+| 200 concurrent seat holds on a 150-seat flight | exactly **150 held / 50 rejected** (pessimistic and optimistic locking) |
+| **10× booking spike** (5/s → 50/s) | 3,575 bookings, 17,875 events, **0 lost messages**, 0% errors, all consumers caught up in 161 s |
+| Kafka → **real Amazon SQS** through a **2-minute network outage** | **1,200 / 1,200 events delivered**, backlog drained in 21 s |
+| Kubernetes (kind + Helm) | 13 pods running, **23/23 end-to-end checks passed** |
 
-## Architecture
+---
 
+## Screenshots
+
+<!-- Add your screenshots to docs/images/ with these file names, then they will appear here. -->
+
+### Grafana Monitoring Dashboard
+
+![SkyBook Grafana dashboard](docs/images/grafana-dashboard.png)
+
+*Request rate, p95 latency, 5xx errors, and search cache hit rate per service during a benchmark run.*
+
+### Swagger API Documentation
+
+![SkyBook Swagger UI](docs/images/swagger-ui.png)
+
+*Interactive OpenAPI documentation served by the API gateway at `/docs`.*
+
+### End-to-End Test Run
+
+![SkyBook e2e results](docs/images/e2e-passed.png)
+
+*The 23-check end-to-end suite: search, auth, idempotency, saga confirmation, compensation, and notifications.*
+
+### Kubernetes Deployment
+
+![SkyBook pods running on Kubernetes](docs/images/kubernetes-pods.png)
+
+*All SkyBook services, Kafka, PostgreSQL, and Redis running on a kind cluster via the Helm chart.*
+
+---
+
+## Key Features
+
+- **Idempotent booking API** — `POST /bookings` requires an `Idempotency-Key`; retries return the saved response, concurrent duplicates get `409`, reused keys with a different body get `422`.
+- **Transactional outbox** in every producing service — no "dual write" between the database and Kafka.
+- **Choreographed saga with compensation** — seat hold → payment → confirm, or release the seat and cancel.
+- **Duplicate-safe consumers** — every event is applied exactly once per consumer via a `processed_events` table.
+- **Overbooking prevention** — pessimistic (`SELECT … FOR UPDATE`) and optimistic (versioned update) locking, both tested.
+- **Seat-hold expiry sweeper** — a crashed payment never strands a seat.
+- **Query tuning** — composite index verified with `EXPLAIN ANALYZE` on a 1M-row table.
+- **Redis cache-aside** with stampede protection (`SET NX PX`) and **event-driven invalidation**.
+- **Retry topics + dead-letter queue** (1m → 5m → 30m → DLQ) with a **replay tool**.
+- **Kafka → AWS SQS bridge** that commits offsets only after AWS confirms and pauses during outages.
+- **JWT authentication** with `CUSTOMER` / `AGENT` roles, Redis rate limiting, and request IDs traced end to end.
+- **Prometheus metrics + Grafana dashboard + alert rules** for latency, consumer lag, outbox backlog, and DLQ growth.
+- **Docker Compose** for local development, **Helm chart** for Kubernetes, **AWS CDK blueprint** for production.
+
+---
+
+## System Architecture
+
+```text
+                         ┌─────────────────────────────────────┐
+  client / k6 ─────────▶ │            API Gateway :8080        │  JWT · roles · rate limit
+                         │   X-Request-Id · Swagger UI (/docs) │  (Redis)
+                         └──────────────────┬──────────────────┘
+          ┌──────────────┬──────────────────┼──────────────┬────────────────┐
+          ▼              ▼                  ▼              ▼                ▼
+   ┌─────────────┐ ┌────────────┐   ┌─────────────┐ ┌────────────┐ ┌──────────────┐
+   │Flight Search│ │  Booking   │   │  Inventory  │ │  Payment   │ │ Notification │
+   │ Postgres +  │ │ Postgres:  │   │ Postgres:   │ │  (mock)    │ │ retries +    │
+   │ Redis cache │ │ idempotency│   │ seat holds  │ │ Postgres   │ │ DLQ + replay │
+   │ read model  │ │ + outbox   │   │ + outbox    │ │ + outbox   │ │ + outbox     │
+   └──────▲──────┘ └─────┬──────┘   └──────┬──────┘ └─────┬──────┘ └──────┬───────┘
+          │              │ outbox          │ outbox       │ outbox        │
+          │              ▼                 ▼              ▼               ▼
+          │   ┌───────────────────────────────────────────────────────────────────┐
+          └───│                        Apache Kafka (KRaft)                       │
+   cache      │ booking.events · inventory.events · payment.events               │
+ invalidation │ notification.retry.{1m,5m,30m} · notification.dlq                │
+              │                (all keyed by flightId → per-flight ordering)      │
+              └──────────────────────────────┬────────────────────────────────────┘
+                                             │
+                                             ▼
+                              ┌──────────────────────────────┐
+                              │  AWS Bridge (KafkaJS + SDK)  │ commit after AWS ack,
+                              │  SendMessageBatch (10/call)  │ pause on outage
+                              └──────────────┬───────────────┘
+                                             ▼
+                              ┌──────────────────────────────┐
+                              │  Amazon SQS flight-events    │
+                              └──────────────────────────────┘
+
+        Prometheus scrapes /metrics on every service ──▶ Grafana dashboard + alerts
 ```
-client ─▶ API Gateway :8080 ── JWT · roles · Redis rate limit · X-Request-Id · Swagger UI (/docs)
-              │
-   ┌──────────┼──────────────┬───────────────┬──────────────┐
-   ▼          ▼              ▼               ▼              ▼
-flight-search booking      inventory       payment (mock) notification
- Postgres +   Postgres:    Postgres:       Postgres       Postgres
- Redis cache  bookings,    seat_inventory, payments       notifications
- read model   idempotency, seat_holds                     retry + DLQ
-              outbox
-        ▲            │ outbox    ▲ │ outbox    ▲ │ outbox    ▲ │
-        └────────────┴──────── Kafka (KRaft) ─┴────────────┴─┘
-   booking.events · inventory.events · payment.events · notification.retry.{1m,5m,30m} · notification.dlq
-                      (all keyed by flightId → per-flight ordering)
-        │
-        └─▶ aws-bridge ── SendMessageBatch (commit offset only after AWS ack, pause on outage) ──▶ Amazon SQS
-                          versioned contracts: skybook.booking.confirmed.v1, skybook.seat.held.v1 …
-```
 
-**Booking saga:** `BookingRequested → SeatHeld → PaymentSucceeded → CONFIRMED`. If payment fails, the flow becomes
-`PaymentFailed → seat released (compensation) → CANCELLED`. If no seat can be held, the booking ends at `SeatHoldFailed → REJECTED`.
-A sweeper releases holds whose 10-minute TTL has passed, so a crashed payment never strands a seat.
-Design decisions are in [docs/architecture.md](docs/architecture.md).
+**Rule:** no service reads another service's database. Services communicate only through Kafka events; external clients go through the gateway.
 
-| Service | Port (internal) | Owns |
+| Service | Responsibility | Owns |
 |---|---|---|
-| gateway | **8080 (published)** | JWT auth, roles, rate limiting, routing, OpenAPI |
-| flight-search | 3001 | `flights`, `airports`, Redis search cache |
-| booking | 3002 | `bookings`, `idempotency_keys`, `outbox_events` |
-| inventory | 3003 | `seat_inventory`, `seat_holds` |
-| payment | 3004 | `payments` (mock provider) |
-| notification | 3005 | `notifications`, retry topics, DLQ |
-| aws-bridge (profile `aws`) | 3006 | Kafka offsets only (the checkpoint); forwards to SQS |
+| **Gateway** | JWT auth, roles, rate limiting, request IDs, routing, OpenAPI | – |
+| **Flight Search** | Search by route and date (read-heavy) | `flights`, `airports`, Redis cache |
+| **Booking** | Idempotent booking API, saga state machine | `bookings`, `idempotency_keys`, `outbox_events` |
+| **Inventory** | Seat holds, overbooking prevention, hold expiry | `seat_inventory`, `seat_holds` |
+| **Payment** | Mock provider with configurable delay and failure rate | `payments` |
+| **Notification** | Confirmation/cancellation messages, retries, DLQ | `notifications` |
+| **AWS Bridge** | Forwards booking events to Amazon SQS without loss | Kafka offsets (checkpoint) |
 
-## Run it (Windows PowerShell)
+---
 
-**Prerequisite:** Docker Desktop running, with about 6 GB of memory available (Settings → Resources). Nothing else is required: Node, Kafka and Postgres all run in containers.
+## Booking Saga
 
-```powershell
-# 1. Unzip and enter the folder
-Expand-Archive .\skybook.zip -DestinationPath . ; cd .\skybook
-
-# 2. Build and start everything (the first run downloads images; allow a few minutes)
-docker compose up --build -d
-
-# 3. Wait until every service is healthy (gateway shows "healthy")
-docker compose ps
-
-# 4. End-to-end check: search, booking, idempotency, saga, compensation, auth
-docker compose --profile tools run --rm e2e
-
-# 5. Unit + integration tests (real PostgreSQL)
-docker compose --profile tools run --rm tests
+```text
+POST /bookings ──▶ BookingRequested ──▶ Inventory: hold seat
+                                            │
+                    ┌───────────────────────┴───────────────────────┐
+                    ▼                                               ▼
+                SeatHeld ──▶ Payment: charge                 SeatHoldFailed
+                                 │                                  │
+               ┌─────────────────┴──────────────┐                   ▼
+               ▼                                ▼            Booking: REJECTED
+       PaymentSucceeded                   PaymentFailed
+               │                                │
+               ▼                                ▼
+     Booking: CONFIRMED            Inventory: release seat  (compensation)
+               │                                │
+               ▼                                ▼
+         Notification               Booking: CANCELLED ──▶ Notification
 ```
 
-Expected end of step 4: `ALL CHECKS PASSED`.
+**Booking states:** `PENDING → SEAT_HELD → CONFIRMED`, or `REJECTED`, or `CANCELLED`.
+
+Seat holds expire after 10 minutes; a sweeper releases expired holds and cancels the booking, so a crashed payment service can never strand a seat.
+
+---
+
+## Technology Stack
+
+### Services
+
+- Node.js 22
+- TypeScript
+- Express 5
+- Zod (request and event validation)
+- KafkaJS
+- node-postgres (`pg`)
+- ioredis
+- pino (structured JSON logs)
+- prom-client (Prometheus metrics)
+- jsonwebtoken (JWT)
+
+### Data & Messaging
+
+- Apache Kafka 3.8 (KRaft mode, no ZooKeeper)
+- PostgreSQL 16 (one database per service)
+- Redis 7
+
+### Cloud & Infrastructure
+
+- AWS SDK v3 (Amazon SQS)
+- AWS CDK (TypeScript) — production blueprint
+- Docker & Docker Compose
+- Kubernetes (kind) & Helm
+- Prometheus & Grafana
+
+### Testing
+
+- Jest & ts-jest
+- PostgreSQL integration tests (Testcontainers supported)
+- k6 load tests
+- End-to-end test suite through the gateway
+- GitHub Actions CI
+
+---
+
+## Repository Structure
+
+```text
+SkyBook-Flight-Booking-Platform/
+├── packages/
+│   └── shared/              # db, kafka, outbox, idempotent consumer, events, http, metrics, logger
+│
+├── services/
+│   ├── gateway/             # JWT, rate limit, routing, openapi.yaml
+│   ├── flight-search/       # search, Redis cache, read model
+│   ├── booking/             # idempotency, saga state machine
+│   ├── inventory/           # seat holds, locking, expiry sweeper
+│   ├── payment/             # mock payment provider
+│   ├── notification/        # retry topics, DLQ
+│   └── aws-bridge/          # Kafka → Amazon SQS
+│
+├── scripts/                 # seed, e2e, DLQ replay, benchmarks, outage test, fake SQS
+├── tests/integration/       # PostgreSQL-backed tests
+├── load-tests/              # k6: search, booking burst, idempotency race
+│
+├── deploy/
+│   ├── helm/skybook/        # Kubernetes Helm chart
+│   ├── prometheus/          # scrape config + alert rules
+│   ├── grafana/             # provisioned dashboard
+│   └── postgres/            # database-per-service init
+│
+├── infra/
+│   ├── aws-blueprint/       # AWS CDK: MSK, RDS, ElastiCache, EKS, SQS, WAF
+│   └── iam/                 # least-privilege IAM policies
+│
+├── docs/                    # architecture, results, benchmarks, failure tests, AWS, Kubernetes
+├── docker-compose.yml
+├── docker-compose.aws.yml   # real-AWS override for the bridge
+├── Dockerfile
+└── README.md
+```
+
+---
+
+## Local Development
+
+### Prerequisites
+
+Install:
+
+- Docker Desktop (about 6 GB of memory available)
+- Git
+
+Node.js is **not** required — every service, Kafka, PostgreSQL, and Redis run in containers.
+
+---
+
+## 1. Clone the Repository
+
+```bash
+git clone https://github.com/Talaha76/SkyBook-Flight-Booking-Platform.git
+cd SkyBook-Flight-Booking-Platform
+```
+
+---
+
+## 2. Start the Stack
+
+```bash
+docker compose up --build -d
+docker compose ps
+```
+
+Wait until `gateway` shows **(healthy)**. A one-time `seed` job loads 20,000 flights automatically.
 
 | Open | URL |
 |---|---|
-| Swagger UI (try every endpoint) | http://localhost:8080/docs |
-| Grafana dashboard "SkyBook Overview" | http://localhost:3000 |
-| Prometheus (targets, alerts) | http://localhost:9090 |
+| Swagger UI | http://localhost:8080/docs |
+| Grafana dashboard | http://localhost:3000 |
+| Prometheus | http://localhost:9090 |
 
-Stop with `docker compose down`, or `docker compose down -v` to also delete the database volume.
+---
 
-### Try it by hand (PowerShell)
+## 3. Verify Everything Works
+
+```bash
+# End-to-end: search, auth, idempotency, saga, compensation, notifications (23 checks)
+docker compose --profile tools run --rm e2e
+
+# Unit + integration tests against real PostgreSQL
+docker compose --profile tools run --rm tests
+```
+
+Expected: `ALL CHECKS PASSED` and `Tests: 40 passed`.
+
+Stop with `docker compose down` (add `-v` to delete the database volume).
+
+---
+
+## Try the API
+
+Demo users (password `skybook`): `alice`, `bob` (CUSTOMER), `agent` (AGENT).
 
 ```powershell
 $login = Invoke-RestMethod -Method Post -Uri http://localhost:8080/auth/login -ContentType 'application/json' -Body '{"username":"alice","password":"skybook"}'
 $h = @{ Authorization = "Bearer $($login.accessToken)" }
 $date = (Get-Date).AddDays(2).ToString('yyyy-MM-dd')
 $flights = Invoke-RestMethod "http://localhost:8080/flights/search?origin=YYZ&destination=YVR&date=$date"
-$flights.flights | Select-Object flightNumber, departureTime, priceCents, seatsAvailable
 
-$key = [guid]::NewGuid().ToString()
 $body = @{ flightId = $flights.flights[0].id; passengerName = 'Alice Martin'; passengerEmail = 'alice@example.com'; paymentToken = 'tok_success' } | ConvertTo-Json
-$booking = Invoke-RestMethod -Method Post -Uri http://localhost:8080/bookings -Headers ($h + @{ 'Idempotency-Key' = $key }) -ContentType 'application/json' -Body $body
+$booking = Invoke-RestMethod -Method Post -Uri http://localhost:8080/bookings -Headers ($h + @{ 'Idempotency-Key' = [guid]::NewGuid().ToString() }) -ContentType 'application/json' -Body $body
 Start-Sleep 2
-Invoke-RestMethod "http://localhost:8080/bookings/$($booking.id)" -Headers $h      # status: CONFIRMED
+Invoke-RestMethod "http://localhost:8080/bookings/$($booking.id)" -Headers $h    # status: CONFIRMED
 ```
 
-Demo users (password `skybook`): `alice`, `bob` (CUSTOMER), and `agent` (AGENT; can read inventory, payments and notifications).
-Payment tokens: `tok_success` always succeeds and `tok_fail` is always declined. Any other token fails randomly at `PAYMENT_FAILURE_RATE` (10 %).
-To watch retries and the dead-letter queue, use a passenger email containing `fail-notify`. The message lands in `notification.dlq` after about 30 s, then run:
+Payment tokens: `tok_success` always succeeds, `tok_fail` is always declined (watch the seat get released), anything else fails at a configurable random rate.
 
-```powershell
-docker compose --profile tools run --rm dlq-replay                      # dry run, last hour
-docker compose --profile tools run --rm dlq-replay --since 1h           # actually replay
+---
+
+## Idempotent Booking Flow
+
+```text
+POST /bookings + Idempotency-Key
+    ↓
+Hash request (method + path + user + body, SHA-256)
+    ↓
+INSERT idempotency key … ON CONFLICT DO NOTHING   ← the unique constraint is the lock
+    ↓
+New key?
+ ├─ yes → ONE transaction: booking row + outbox event + saved response → 201
+ └─ no  → same hash + COMPLETED   → replay saved response (201)
+          same hash + IN_PROGRESS → 409 Conflict + Retry-After
+          different hash          → 422 (key reused with a different request)
 ```
 
-### Kafka → AWS SQS bridge
+Verified: **100 identical concurrent requests → 1 booking, 0 duplicates.**
 
-```powershell
-docker compose --profile aws up -d                                           # bridge + local fake SQS (no AWS account)
-docker compose --profile aws --profile tools run --rm bridge-outage-test     # 2-min AWS outage: produced == received?
+---
+
+## Search & Caching Flow
+
+```text
+GET /flights/search?origin&destination&date
+    ↓
+Redis GET search:{origin}:{dest}:{date}
+ ├─ hit  → return cached result
+ └─ miss → SET lock NX PX 2000 (one request rebuilds; others wait briefly)
+             ↓
+          PostgreSQL (composite index on origin, destination, date, time)
+             ↓
+          cache result for 60 s
 ```
 
-For real AWS (free tier), see [docs/aws-setup.md](docs/aws-setup.md). For Kubernetes (kind + Helm), see [docs/kubernetes.md](docs/kubernetes.md).
-For the AWS production blueprint: `cd infra/aws-blueprint; npm ci; npm test` (synth + 12 checks); costs are in [docs/aws-cost-estimate.md](docs/aws-cost-estimate.md).
+Seat availability changes arrive as `inventory.events`; Flight Search updates its read model and **deletes the matching cache key after the database commit**, so searches never show stale availability for long.
 
-### Get your resume numbers (one command)
+---
 
-```powershell
-.\scripts\run-benchmarks.ps1               # ~15 min: 1M-row seed, EXPLAIN, k6 search x3, idempotency race, 10x spike
-.\scripts\run-benchmarks.ps1 -WithBridge   # + the 2-minute bridge outage test (fake SQS)
-```
+## Reliability Patterns
 
-It writes `load-tests\results\RESULTS.md`: result tables plus the build guide's resume bullets, filled in with **your** measurements.
-If PowerShell blocks the script, run it once with
-`powershell -ExecutionPolicy Bypass -File .\scripts\run-benchmarks.ps1`.
-
-### Load tests (k6, runs in a container)
-
-```powershell
-docker compose --profile tools run --rm k6 run /scripts/search.js
-docker compose --profile tools run --rm k6 run /scripts/idempotency-race.js
-docker compose --profile tools run --rm k6 run /scripts/booking-burst.js
-```
-
-### Developing without Docker for the services
-
-```powershell
-npm ci; npm run build
-docker compose up -d postgres redis kafka   # infrastructure only
-$env:TEST_DATABASE_URL = 'postgres://postgres:postgres@localhost:5432/skybook_test'; npm test
-```
-
-## Key implementations
-
-| Feature | Where | Proof |
+| Pattern | Where | What it prevents |
 |---|---|---|
-| Idempotent `POST /bookings` (key = lock, saved response replay, 409/422) | `services/booking/src/idempotency.ts`, `bookings.ts` | 50 (integration) and 100 (k6) concurrent identical requests → **1 booking** |
-| Transactional outbox, `FOR UPDATE SKIP LOCKED`, exponential backoff | `packages/shared/src/outbox.ts` | Kafka stopped mid-booking → 201 returned, confirmed 7 s after Kafka returned |
-| Duplicate-safe consumers (`processed_events`) | `packages/shared/src/consumer.ts` | same event twice → state changes once |
-| Saga + compensation | `services/booking/src/saga.ts`, `services/inventory/src/handlers.ts` | e2e: `tok_fail` → CANCELLED, seat restored |
-| No overbooking (row lock **and** optimistic version) | `services/inventory/src/holds.ts` | 200 concurrent holds / 150 seats → **150 / 50** for both |
-| Composite index | `services/flight-search/src/migrations.ts` | 1M rows: k6 p95 **1,021 → 28 ms**; `EXPLAIN ANALYZE` 73 → 0.28 ms |
-| Redis cache-aside, `SET NX PX` stampede lock, invalidation on `inventory.events` | `services/flight-search/src/search.ts` | e2e: second search `X-Cache: HIT`; availability updates after booking |
-| Retry topics 1m/5m/30m → DLQ → replay tool | `services/notification/src`, `scripts/dlq-replay.ts` | failing recipient → `DEAD` after 3 retries; replay lists it |
-| JWT + roles, zod validation, internal service token | `services/gateway/src`, `packages/shared/src/http.ts` | e2e: 401 / 403 checks |
-| Metrics, JSON logs, request IDs carried through Kafka | `packages/shared/src/metrics.ts`, `logger.ts` | one `requestId` appears on all 6 services' log lines |
-| Kafka → SQS bridge: commit-after-ack, `Failed[]` retry, pause/resume circuit breaker | `services/aws-bridge/src` | real SQS, 2-minute network outage: **1,200 / 1,200 events delivered**, backlog drained in 21 s |
-| AWS CDK blueprint (MSK Serverless, 5× RDS, ElastiCache, EKS + IRSA, SQS + DLQ, WAF, ECR, AMP) | `infra/aws-blueprint` | `cdk synth`: 78 resources; 12/12 assertion checks incl. least-privilege bridge role |
-| Helm chart (kind or EKS) | `deploy/helm/skybook` | templates rendered and validated for the kind and EKS profiles |
+| Transactional outbox | Booking, Inventory, Payment, Notification | Database commit succeeds but the Kafka publish is lost (or the reverse) |
+| `processed_events` deduplication | Every consumer | At-least-once delivery applying an event twice |
+| Offsets committed only after the DB commit | Shared consumer | Losing an event when a service crashes mid-processing |
+| Pessimistic / optimistic seat locking | Inventory | Overbooking under concurrent requests |
+| Hold expiry sweeper | Inventory | Seats stranded by a crashed payment service |
+| Retry topics + DLQ + replay tool | Notification | Transient failures becoming lost messages |
+| Circuit breaker (pause/resume) | AWS Bridge | Losing events during an AWS outage |
+| Fail-open rate limiter, cache fallback | Gateway, Flight Search | A Redis outage taking down the API |
+
+Failure tests (Payment killed mid-booking, Kafka stopped, AWS unreachable, Redis down) are documented in [`docs/failure-tests.md`](docs/failure-tests.md).
+
+---
+
+## Kafka → AWS SQS Bridge
+
+The bridge consumes `booking.events` and `inventory.events` and forwards each event to **Amazon SQS** as a versioned contract (`skybook.booking.confirmed.v1`, `skybook.seat.held.v1`, …).
+
+- Sends with `SendMessageBatch` (up to 10 messages per call).
+- **Commits Kafka offsets only after AWS confirms** each batch.
+- Retries only the entries AWS returns in `Failed[]`, with exponential backoff.
+- On repeated failures, **pauses its Kafka partitions** and lets Kafka hold the backlog, then resumes all partitions on the first successful send.
+- Copies the Kafka `eventId` into an SQS message attribute for downstream deduplication.
+- Strips sensitive fields (payment tokens) before anything leaves Kafka.
+- Uses short-lived `aws login` credentials locally and IRSA on EKS — **no access keys in code**.
+
+**Measured against real Amazon SQS:** a 2-minute network outage during 300 bookings → **1,200 / 1,200 events delivered**, none lost, backlog drained in 21 s.
+
+```bash
+# Local, no AWS account (fake SQS):
+docker compose --profile aws up -d
+docker compose --profile aws --profile tools run --rm bridge-outage-test
+```
+
+Real-AWS setup: [`docs/aws-setup.md`](docs/aws-setup.md).
+
+---
+
+## Kubernetes Deployment
+
+The Helm chart in `deploy/helm/skybook` deploys every service (with readiness/liveness probes, non-root containers, Prometheus annotations, a NetworkPolicy, and a seed Job). With default values it also runs dev-only Kafka, PostgreSQL, and Redis inside the cluster.
+
+```bash
+kind create cluster --name skybook
+kind load docker-image skybook-app:latest --name skybook
+helm install skybook ./deploy/helm/skybook --namespace skybook --create-namespace
+kubectl -n skybook get pods
+```
+
+Verified on kind: **13 pods running, 23/23 end-to-end checks passed** against the cluster. Details: [`docs/kubernetes.md`](docs/kubernetes.md).
+
+---
+
+## AWS Production Blueprint
+
+`infra/aws-blueprint` is an **AWS CDK (TypeScript)** design of the production deployment — synthesized and checked, **not deployed**:
+
+| Local component | AWS production equivalent |
+|---|---|
+| Kafka (KRaft container) | Amazon MSK Serverless (IAM auth) |
+| PostgreSQL per service | Amazon RDS for PostgreSQL (one instance per service) |
+| Redis | Amazon ElastiCache (Multi-AZ) |
+| kind + Helm | Amazon EKS + the same Helm chart, IRSA for pod credentials |
+| Container image | Amazon ECR |
+| Secrets in env vars | AWS Secrets Manager |
+| Gateway exposure | Application Load Balancer + AWS WAF |
+| Prometheus | Amazon Managed Service for Prometheus |
+
+`cdk synth` produces 78 CloudFormation resources and passes 12 assertion checks, including a bridge role limited to `sqs:SendMessage` on a single queue. A cost breakdown (≈ $923/month as designed, ≈ $420 with MSK Provisioned) is in [`docs/aws-cost-estimate.md`](docs/aws-cost-estimate.md).
+
+---
+
+## API Overview
+
+All endpoints are served through the gateway on port `8080`:
+
+```text
+POST   /auth/login                  # demo JWT login
+
+GET    /flights/search              # ?origin=YYZ&destination=YVR&date=YYYY-MM-DD
+GET    /flights/{id}
+GET    /airports
+
+POST   /bookings                    # requires Bearer token + Idempotency-Key
+GET    /bookings                    # customers: own bookings; agents: all
+GET    /bookings/{id}
+
+GET    /inventory/{flightId}        # AGENT only
+GET    /payments/{bookingId}        # AGENT only
+GET    /notifications               # AGENT only
+
+GET    /health
+GET    /ready
+GET    /metrics
+GET    /docs                        # Swagger UI
+GET    /openapi.json
+```
+
+---
+
+## Monitoring
+
+Every service exposes `/metrics` for Prometheus:
+
+- `http_request_duration_seconds` (latency histogram per route and status)
+- `kafka_consumer_lag`
+- `outbox_pending_total`
+- `cache_hits_total` / `cache_misses_total`
+- `dlq_messages_total`
+- `bridge_forwarded_total`, `bridge_paused`, `bridge_end_to_end_seconds`
+
+The provisioned **Grafana dashboard** shows request rate, p95 latency, 5xx errors, cache hit rate, consumer lag, outbox backlog, consumed events, notifications/DLQ, and bridge throughput.
+
+**Alert rules:** DLQ growth, outbox backlog, high consumer lag, bridge paused, service down.
+
+Structured JSON logs carry `requestId`, `bookingId`, and `eventId`; the `X-Request-Id` travels from HTTP into Kafka headers, so a single booking can be followed across all services.
+
+---
+
+## Benchmarks
+
+One command runs every measurement and writes `load-tests/results/RESULTS.md`, including resume-ready summaries:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run-benchmarks.ps1
+```
+
+| Benchmark | Result |
+|---|---|
+| Search, no index (k6, 20 VUs) | p95 1,020.7 ms, 35 req/s |
+| Search, composite index | p95 28.4 ms, 1,120 req/s |
+| Search, index + Redis cache | p95 25.5 ms, 1,641 req/s, 89.1% hit rate |
+| Idempotency race (100 concurrent) | 1 stored booking, 0 duplicates |
+| 10× spike | 0 lost messages, peak lag 3,092, caught up in 161 s |
+
+The spike test also exposed the system's bottleneck: the **payment consumer** (a deliberate 200 ms mock provider), visible on the Grafana consumer-lag panel. The booking API itself stayed at **22.6 ms p95** because the outbox and Kafka absorb the burst.
+
+---
 
 ## Testing
 
-- **Unit tests (31)**: idempotency branches with a mocked repository, request hashing, the saga state machine, retry routing,
-  the mock payment provider, JWT auth, search validation, and the bridge (contracts, partial-failure retry, outage → no commit).
-- **Integration tests (9)**: real PostgreSQL. Uses `TEST_DATABASE_URL` if set, otherwise Testcontainers. Covers the idempotency race,
-  replay and 422, overbooking with both lock strategies, duplicate events, compensation, and hold expiry.
-- **E2E (23 checks)**: `scripts/e2e.ts` runs through the gateway against the running stack.
-- **Load**: k6 scripts in `load-tests/`.
-
-## Project layout
-
-```
-packages/shared/      db, kafka, outbox, idempotent consumer, events (zod), http app, metrics, logger
-services/<name>/src/  gateway · flight-search · booking · inventory · payment · notification · aws-bridge
-scripts/              seed-flights, e2e, dlq-replay, explain-benchmark, fake-sqs, bridge-outage-test
-tests/integration/    PostgreSQL-backed tests
-load-tests/           k6 scripts
-deploy/               postgres init, prometheus (+alerts), grafana provisioning + dashboard, helm/skybook chart
-infra/aws-blueprint/  AWS CDK (TypeScript) production blueprint, synth-only, with assertion checks
-infra/iam/            least-privilege IAM policies for the bridge and the outage-test verifier
-docs/                 architecture, benchmarks, failure tests, AWS setup, AWS cost estimate, Kubernetes, progress
+```bash
+docker compose --profile tools run --rm tests   # 31 unit + 9 integration tests
+docker compose --profile tools run --rm e2e     # 23 end-to-end checks
 ```
 
-## Status
+- **Unit tests:** idempotency branches (mocked repository), request hashing, the saga state machine, retry routing, the mock payment provider, JWT auth, search validation, and the AWS bridge (partial failures, outages).
+- **Integration tests (real PostgreSQL):** 50-request idempotency race, saved-response replay, overbooking with both lock strategies, duplicate event delivery, compensation, hold expiry.
+- **End-to-end:** the full saga through the gateway, including payment failure compensation and authorization rules.
+- **Load:** k6 scripts in `load-tests/`.
 
-See [docs/progress.md](docs/progress.md) for what's done, what's verified, and what's still to run on real infrastructure
-(the real-AWS bridge test, a kind install, k6 numbers).
+---
+
+## Configuration
+
+All configuration comes from environment variables (see `.env.example`). Key settings:
+
+```env
+JWT_SECRET=change-me
+INTERNAL_TOKEN=change-me
+INVENTORY_LOCK_STRATEGY=pessimistic     # or optimistic
+SEAT_HOLD_TTL_SECONDS=600
+PAYMENT_FAILURE_RATE=0.1
+SEARCH_CACHE_ENABLED=true
+NOTIFICATION_RETRY_DELAYS_MS=60000,300000,1800000
+
+# AWS bridge (real AWS)
+SQS_QUEUE_URL=https://sqs.<region>.amazonaws.com/<account-id>/skybook-flight-events
+AWS_REGION=us-east-2
+```
+
+Do not commit `.env` — it is git-ignored. AWS credentials come from your local AWS CLI profile, never from files in this repository.
+
+---
+
+## Design Notes
+
+### Why an outbox instead of publishing directly to Kafka?
+
+Publishing from the request handler creates a dual write: the database commit can succeed while the Kafka publish fails, or the reverse. Writing the event to `outbox_events` in the **same transaction** as the business change makes them atomic; a publisher loop (`FOR UPDATE SKIP LOCKED`) ships rows to Kafka.
+
+### Why at-least-once delivery?
+
+Exactly-once across a database and Kafka is expensive and fragile. SkyBook accepts at-least-once delivery and makes duplicates harmless: every consumer records the `eventId` in the same transaction as its change.
+
+### Why a saga instead of two-phase commit?
+
+Each service owns its data, so there is no shared transaction. The saga uses local transactions plus **compensating actions** (releasing a held seat) to keep the system consistent.
+
+### Why key Kafka messages by `flightId`?
+
+All events for one flight land on the same partition and are processed in order, while different flights are processed in parallel.
+
+### Pessimistic vs. optimistic locking
+
+Both strategies are implemented and pass the 200-request / 150-seat test; the strategy is a configuration switch (`INVENTORY_LOCK_STRATEGY`).
+
+---
+
+## Limitations
+
+SkyBook is a portfolio project, not a production airline system.
+
+- Authentication uses three built-in demo users (HS256 JWTs); production would use an identity provider with RS256/JWKS.
+- The payment provider is a mock with configurable delay and failure rate — no real card data is handled.
+- Locally, one PostgreSQL server hosts all service databases (schemas remain fully isolated).
+- Kubernetes was verified on kind (local), and the AWS blueprint is synthesized but not deployed.
+- If a seat hold expires *and* the payment later succeeds, there is no automatic refund step (payment rejects expired holds, which narrows the window).
+- Benchmark numbers come from a single developer machine and are not production-scale figures.
+
+---
+
+## Future Improvements
+
+Possible extensions include:
+
+- EventBridge as a second bridge target,
+- OpenTelemetry tracing into Jaeger,
+- Kafka Schema Registry with Avro/Protobuf event schemas,
+- consumer-lag-driven autoscaling (KEDA),
+- concurrent payment processing within a partition,
+- a refund step for late payments on expired holds,
+- contract tests between services (Pact),
+- a deployed AWS environment (EKS + MSK + RDS).
+
+---
+
+## Project Goal
+
+SkyBook was built to demonstrate how a booking system can stay **correct under concurrency, duplicates, partial failures, and traffic spikes** — and to prove it with measurements rather than claims.
+
+The project combines:
+
+**Microservices + Event Streaming + Idempotent APIs + Sagas + Caching + AWS Integration + Kubernetes + Monitoring**
+
+into one end-to-end, fully tested flight-booking platform.
