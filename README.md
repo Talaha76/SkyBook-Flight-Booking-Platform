@@ -74,14 +74,6 @@ All results were produced by the project's own test and benchmark scripts (`scri
 
 ---
 
-### Kubernetes Deployment
-
-![SkyBook pods running on Kubernetes](docs/images/kubernetes-pods.png)
-
-*All SkyBook services, Kafka, PostgreSQL, and Redis running on a kind cluster via the Helm chart.*
-
----
-
 ## Key Features
 
 - **Idempotent booking API** — `POST /bookings` requires an `Idempotency-Key`; retries return the saved response, concurrent duplicates get `409`, reused keys with a different body get `422`.
