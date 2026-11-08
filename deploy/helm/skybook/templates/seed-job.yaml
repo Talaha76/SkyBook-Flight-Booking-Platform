@@ -1,0 +1,28 @@
+{{- if .Values.seed.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: skybook-seed
+  labels: {{- include "skybook.labels" . | nindent 4 }}
+spec:
+  backoffLimit: 10
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: OnFailure
+      securityContext: { runAsNonRoot: true, runAsUser: 1000 }
+      containers:
+        - name: seed
+          image: {{ include "skybook.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["node", "dist/scripts/seed-flights.js"]
+          env:
+            - name: PGPASSWORD
+              valueFrom: { secretKeyRef: { name: {{ include "skybook.secretName" . }}, key: postgresPassword } }
+            - name: FLIGHTS_DATABASE_URL
+              value: "postgres://{{ .Values.connections.postgresUser }}:$(PGPASSWORD)@{{ .Values.connections.postgresHost }}:5432/skybook_flights"
+            - name: INVENTORY_DATABASE_URL
+              value: "postgres://{{ .Values.connections.postgresUser }}:$(PGPASSWORD)@{{ .Values.connections.postgresHost }}:5432/skybook_inventory"
+            - name: SEED_FLIGHTS
+              value: {{ .Values.seed.flights | quote }}
+{{- end }}

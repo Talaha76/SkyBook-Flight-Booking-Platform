@@ -1,0 +1,9 @@
+node_modules/
+dist/
+coverage/
+.env
+*.log
+cdk.out/
+infra/aws-blueprint/dist/
+load-tests/results/*.json
+load-tests/results/RESULTS.md

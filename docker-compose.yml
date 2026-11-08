@@ -1,0 +1,318 @@
+# SkyBook local stack.
+#   docker compose up --build -d                 # start everything (gateway on http://localhost:8080)
+#   docker compose --profile tools run --rm e2e  # end-to-end check through the gateway
+#   docker compose --profile tools run --rm tests  # unit + integration tests
+name: skybook
+
+x-app: &app
+  image: skybook-app:latest
+  build: .
+  restart: unless-stopped
+  environment: &app-env
+    KAFKA_BROKERS: kafka:9092
+    REDIS_URL: redis://redis:6379
+    INTERNAL_TOKEN: ${INTERNAL_TOKEN:-dev-internal-token}
+    LOG_LEVEL: ${LOG_LEVEL:-info}
+  depends_on: &app-deps
+    postgres: { condition: service_healthy }
+    kafka: { condition: service_healthy }
+    redis: { condition: service_healthy }
+
+x-health: &health
+  interval: 10s
+  timeout: 5s
+  retries: 12
+  start_period: 20s
+
+services:
+  # ---------------------------------------------------------------- infrastructure
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./deploy/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  kafka:
+    image: apache/kafka:3.8.0
+    ports: ["29092:29092"]
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_HEAP_OPTS: -Xmx512m -Xms256m
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 20s
+
+  # ---------------------------------------------------------------- one-shot seed
+  seed:
+    <<: *app
+    restart: "no"
+    command: ["node", "dist/scripts/seed-flights.js"]
+    environment:
+      FLIGHTS_DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/skybook_flights
+      INVENTORY_DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/skybook_inventory
+      SEED_FLIGHTS: ${SEED_FLIGHTS:-20000}
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  # ---------------------------------------------------------------- services
+  flight-search:
+    <<: *app
+    command: ["node", "dist/services/flight-search/src/index.js"]
+    environment:
+      <<: *app-env
+      PORT: 3001
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/skybook_flights
+      SEARCH_CACHE_ENABLED: ${SEARCH_CACHE_ENABLED:-true}
+      SEARCH_CACHE_TTL_SECONDS: 60
+    depends_on:
+      <<: *app-deps
+      seed: { condition: service_completed_successfully }
+    healthcheck: { <<: *health, test: ["CMD", "node", "-e", "fetch('http://localhost:3001/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"] }
+
+  booking:
+    <<: *app
+    command: ["node", "dist/services/booking/src/index.js"]
+    environment:
+      <<: *app-env
+      PORT: 3002
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/skybook_booking
+    healthcheck: { <<: *health, test: ["CMD", "node", "-e", "fetch('http://localhost:3002/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"] }
+
+  inventory:
+    <<: *app
+    command: ["node", "dist/services/inventory/src/index.js"]
+    environment:
+      <<: *app-env
+      PORT: 3003
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/skybook_inventory
+      INVENTORY_LOCK_STRATEGY: ${INVENTORY_LOCK_STRATEGY:-pessimistic}
+      SEAT_HOLD_TTL_SECONDS: ${SEAT_HOLD_TTL_SECONDS:-600}
+    depends_on:
+      <<: *app-deps
+      seed: { condition: service_completed_successfully }
+    healthcheck: { <<: *health, test: ["CMD", "node", "-e", "fetch('http://localhost:3003/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"] }
+
+  payment:
+    <<: *app
+    command: ["node", "dist/services/payment/src/index.js"]
+    environment:
+      <<: *app-env
+      PORT: 3004
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/skybook_payment
+      PAYMENT_FAILURE_RATE: ${PAYMENT_FAILURE_RATE:-0.1}
+      PAYMENT_DELAY_MS: ${PAYMENT_DELAY_MS:-200}
+    healthcheck: { <<: *health, test: ["CMD", "node", "-e", "fetch('http://localhost:3004/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"] }
+
+  notification:
+    <<: *app
+    command: ["node", "dist/services/notification/src/index.js"]
+    environment:
+      <<: *app-env
+      PORT: 3005
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/skybook_notification
+      NOTIFICATION_FAILURE_RATE: ${NOTIFICATION_FAILURE_RATE:-0}
+      # Real values are 60000,300000,1800000 (1m/5m/30m). Shortened so the DLQ demo takes ~30 s.
+      NOTIFICATION_RETRY_DELAYS_MS: ${NOTIFICATION_RETRY_DELAYS_MS:-5000,10000,15000}
+    healthcheck: { <<: *health, test: ["CMD", "node", "-e", "fetch('http://localhost:3005/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"] }
+
+  gateway:
+    <<: *app
+    command: ["node", "dist/services/gateway/src/index.js"]
+    ports: ["8080:8080"]
+    environment:
+      <<: *app-env
+      PORT: 8080
+      JWT_SECRET: ${JWT_SECRET:-dev-only-change-me-please-32-chars-min}
+      DEMO_PASSWORD: ${DEMO_PASSWORD:-skybook}
+      RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-6000}
+      FLIGHT_SEARCH_URL: http://flight-search:3001
+      BOOKING_URL: http://booking:3002
+      INVENTORY_URL: http://inventory:3003
+      PAYMENT_URL: http://payment:3004
+      NOTIFICATION_URL: http://notification:3005
+    depends_on:
+      redis: { condition: service_healthy }
+      flight-search: { condition: service_healthy }
+      booking: { condition: service_healthy }
+      inventory: { condition: service_healthy }
+      payment: { condition: service_healthy }
+      notification: { condition: service_healthy }
+    healthcheck: { <<: *health, test: ["CMD", "node", "-e", "fetch('http://localhost:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"] }
+
+  # ---------------------------------------------------------------- Kafka -> AWS bridge (docker compose --profile aws up -d)
+  # Default target is the local fake SQS (no AWS account needed). For real AWS add -f docker-compose.aws.yml.
+  fake-sqs:
+    <<: *app
+    profiles: ["aws"]
+    command: ["node", "dist/scripts/fake-sqs.js"]
+    ports: ["4566:4566"]
+    environment:
+      PORT: 4566
+    depends_on: []
+    healthcheck: { <<: *health, test: ["CMD", "node", "-e", "fetch('http://localhost:4566/stats').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"] }
+
+  aws-bridge:
+    <<: *app
+    profiles: ["aws"]
+    command: ["node", "dist/services/aws-bridge/src/index.js"]
+    ports: ["3006:3006"]
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      PORT: 3006
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      AWS_REGION: ${AWS_REGION:-us-east-2}
+      SQS_QUEUE_URL: ${SQS_QUEUE_URL:-http://fake-sqs:4566/000000000000/skybook-flight-events}
+      SQS_ENDPOINT: ${SQS_ENDPOINT-http://fake-sqs:4566}
+      # Fake credentials for the local fake only; real AWS uses your ~/.aws profile (docker-compose.aws.yml).
+      AWS_ACCESS_KEY_ID: ${FAKE_AWS_KEY:-local-fake}
+      AWS_SECRET_ACCESS_KEY: ${FAKE_AWS_SECRET:-local-fake}
+    depends_on:
+      kafka: { condition: service_healthy }
+      fake-sqs: { condition: service_healthy, required: false }
+    healthcheck: { <<: *health, test: ["CMD", "node", "-e", "fetch('http://localhost:3006/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"] }
+
+  bridge-outage-test:
+    <<: *app
+    profiles: ["tools"]
+    restart: "no"
+    entrypoint: ["node", "dist/scripts/bridge-outage-test.js"]
+    command: ["--bookings", "300", "--rate", "10", "--outage", "120"]
+    environment:
+      GATEWAY_URL: http://gateway:8080
+      FAKE_SQS_URL: http://fake-sqs:4566
+      BRIDGE_METRICS_URL: http://aws-bridge:3006
+      KAFKA_BROKERS: kafka:9092
+      DEMO_PASSWORD: ${DEMO_PASSWORD:-skybook}
+      RESULTS_DIR: /results
+    user: root
+    volumes:
+      - ./load-tests/results:/results
+    depends_on:
+      gateway: { condition: service_healthy }
+
+  # ---------------------------------------------------------------- monitoring
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    ports: ["9090:9090"]
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+    depends_on: [gateway]
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    ports: ["3000:3000"]
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on: [prometheus]
+
+  # ---------------------------------------------------------------- tools (docker compose --profile tools run --rm <name>)
+  e2e:
+    <<: *app
+    profiles: ["tools"]
+    restart: "no"
+    command: ["node", "dist/scripts/e2e.js"]
+    environment:
+      GATEWAY_URL: http://gateway:8080
+      DEMO_PASSWORD: ${DEMO_PASSWORD:-skybook}
+    depends_on:
+      gateway: { condition: service_healthy }
+
+  tests:
+    <<: *app
+    profiles: ["tools"]
+    restart: "no"
+    command: ["npx", "jest", "--runInBand"]
+    environment:
+      TEST_DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/skybook_test
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  dlq-replay:
+    <<: *app
+    profiles: ["tools"]
+    restart: "no"
+    entrypoint: ["node", "dist/scripts/dlq-replay.js"]
+    command: ["--since", "1h", "--dry-run"]
+    environment:
+      KAFKA_BROKERS: kafka:9092
+    depends_on:
+      kafka: { condition: service_healthy }
+
+  k6:
+    image: grafana/k6:0.54.0
+    profiles: ["tools"]
+    user: root   # so results can be written to the bind mount on Linux hosts too
+    volumes:
+      - ./load-tests:/scripts:ro
+      - ./load-tests/results:/results
+    environment:
+      GATEWAY_URL: http://gateway:8080
+      SEARCH_URL: http://flight-search:3001
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:-dev-internal-token}
+      DEMO_PASSWORD: ${DEMO_PASSWORD:-skybook}
+    depends_on:
+      gateway: { condition: service_healthy }
+
+  # Benchmark helpers: docker compose --profile tools run --rm bench dist/scripts/<script>.js [args]
+  bench:
+    <<: *app
+    profiles: ["tools"]
+    restart: "no"
+    user: root
+    entrypoint: ["node"]
+    command: ["dist/scripts/bench-report.js"]
+    volumes:
+      - ./load-tests/results:/results
+    environment:
+      RESULTS_DIR: /results
+      KAFKA_BROKERS: kafka:9092
+      REDIS_URL: redis://redis:6379
+      FLIGHTS_DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/skybook_flights
+      INVENTORY_DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/skybook_inventory
+      BOOKING_DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/skybook_booking
+      BENCH_WHERE: ${BENCH_WHERE:-local Docker}
+    depends_on: []
+
+volumes:
+  pgdata:

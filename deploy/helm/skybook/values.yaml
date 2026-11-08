@@ -1,0 +1,106 @@
+# Defaults target a local kind cluster: in-cluster Postgres/Redis/Kafka, image loaded with `kind load`.
+# On EKS: set infra.enabled=false and point the connection values at RDS / ElastiCache / MSK (CDK outputs).
+
+image:
+  repository: skybook-app
+  tag: latest
+  pullPolicy: IfNotPresent   # kind: image is side-loaded, never pulled
+
+# Secrets. On EKS use External Secrets Operator + AWS Secrets Manager instead (secrets.existingSecret).
+secrets:
+  existingSecret: ""
+  jwtSecret: dev-only-change-me-please-32-chars-min
+  internalToken: dev-internal-token
+  demoPassword: skybook
+  postgresPassword: postgres
+
+connections:
+  kafkaBrokers: skybook-kafka:9092
+  redisUrl: redis://skybook-redis:6379
+  postgresHost: skybook-postgres
+  postgresUser: postgres
+
+logLevel: info
+
+serviceAccount:
+  # IRSA on EKS: eks.amazonaws.com/role-arn: <AppRoleArn CDK output>
+  annotations: {}
+
+services:
+  gateway:
+    port: 8080
+    replicas: 2
+    entry: dist/services/gateway/src/index.js
+    env:
+      RATE_LIMIT_PER_MINUTE: "6000"
+      FLIGHT_SEARCH_URL: http://skybook-flight-search:3001
+      BOOKING_URL: http://skybook-booking:3002
+      INVENTORY_URL: http://skybook-inventory:3003
+      PAYMENT_URL: http://skybook-payment:3004
+      NOTIFICATION_URL: http://skybook-notification:3005
+  flight-search:
+    port: 3001
+    replicas: 2
+    database: skybook_flights
+    entry: dist/services/flight-search/src/index.js
+    env:
+      SEARCH_CACHE_ENABLED: "true"
+  booking:
+    port: 3002
+    replicas: 2
+    database: skybook_booking
+    entry: dist/services/booking/src/index.js
+    env: {}
+  inventory:
+    port: 3003
+    replicas: 2
+    database: skybook_inventory
+    entry: dist/services/inventory/src/index.js
+    env:
+      INVENTORY_LOCK_STRATEGY: pessimistic
+  payment:
+    port: 3004
+    replicas: 1
+    database: skybook_payment
+    entry: dist/services/payment/src/index.js
+    env:
+      PAYMENT_FAILURE_RATE: "0.1"
+  notification:
+    port: 3005
+    replicas: 1
+    database: skybook_notification
+    entry: dist/services/notification/src/index.js
+    env:
+      NOTIFICATION_RETRY_DELAYS_MS: "60000,300000,1800000"
+
+resources:
+  requests: { cpu: 50m, memory: 96Mi }
+  limits: { memory: 384Mi }
+
+seed:
+  enabled: true
+  flights: "20000"
+
+awsBridge:
+  enabled: false
+  port: 3006
+  region: us-east-2
+  queueUrl: ""            # FlightEventsQueueUrl CDK output
+  endpoint: ""            # leave empty for real AWS
+  serviceAccountAnnotations: {}   # eks.amazonaws.com/role-arn: <BridgeRoleArn CDK output>
+
+ingress:
+  enabled: false
+  className: ""           # "alb" on EKS (AWS Load Balancer Controller), "nginx" on kind
+  host: ""
+  annotations: {}         # alb.ingress.kubernetes.io/wafv2-acl-arn: <GatewayWafArn CDK output>
+
+networkPolicy:
+  enabled: true
+
+# Dev-only in-cluster infrastructure (single replica, no persistence guarantees).
+infra:
+  enabled: true
+  postgresImage: postgres:16-alpine
+  redisImage: redis:7-alpine
+  kafkaImage: apache/kafka:3.8.0

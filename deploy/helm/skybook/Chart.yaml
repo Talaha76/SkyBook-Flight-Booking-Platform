@@ -1,0 +1,6 @@
+apiVersion: v2
+name: skybook
+description: SkyBook flight booking microservices (gateway, flight-search, booking, inventory, payment, notification, aws-bridge)
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

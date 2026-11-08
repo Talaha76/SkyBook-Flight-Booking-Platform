@@ -1,0 +1,33 @@
+groups:
+  - name: skybook
+    rules:
+      - alert: NotificationDeadLettered
+        expr: increase(dlq_messages_total[5m]) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "Notifications are landing in notification.dlq"
+          description: "{{ $value }} message(s) dead-lettered in the last 5m. Fix the cause, then run the DLQ replay tool."
+      - alert: OutboxBacklog
+        expr: outbox_pending_total > 500
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.service }} outbox is not draining (Kafka down?)"
+      - alert: ConsumerLagHigh
+        expr: max by (group) (kafka_consumer_lag) > 1000
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "Consumer group {{ $labels.group }} is falling behind"
+      - alert: ServiceDown
+        expr: up{job="skybook"} == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.instance }} is down"
+      - alert: BridgePaused
+        expr: max(bridge_paused) == 1
+        for: 1m
+        labels: { severity: warning }
+        annotations:
+          summary: "Kafka -> SQS bridge paused: AWS unreachable, backlog held in Kafka"

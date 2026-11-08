@@ -1,0 +1,32 @@
+# Real-AWS override for the Kafka -> SQS bridge.
+#   docker compose -f docker-compose.yml -f docker-compose.aws.yml --profile aws up -d aws-bridge
+# Needs in .env:  SQS_QUEUE_URL=https://sqs.<region>.amazonaws.com/<account>/skybook-flight-events
+#                 AWS_REGION=us-east-2   (your project's region)
+# Credentials: your local AWS CLI profile (default "skybook", created with `aws login --profile skybook`).
+# The SDK reads the login session from ~/.aws and refreshes it every 15 min, so the folder is mounted
+# read-write. Works the same with an access-key profile. No keys are put in this repo, .env, or the image.
+services:
+  aws-bridge:
+    environment:
+      SQS_ENDPOINT: ""
+      AWS_PROFILE: ${AWS_PROFILE:-skybook}
+      AWS_ACCESS_KEY_ID: ""
+      AWS_SECRET_ACCESS_KEY: ""
+      AWS_SDK_LOAD_CONFIG: "1"
+    volumes:
+      - ${USERPROFILE:-${HOME}}/.aws:/home/node/.aws
+    depends_on: !override
+      kafka: { condition: service_healthy }
+
+  # Real-AWS outage test: docker compose -f docker-compose.yml -f docker-compose.aws.yml --profile aws --profile tools run --rm bridge-outage-test
+  # Uses VERIFY_AWS_PROFILE (default: same profile). Needs sqs:ReceiveMessage + sqs:DeleteMessage on the TEST queue.
+  bridge-outage-test:
+    command: ["--manual", "--bookings", "300", "--rate", "10", "--outage", "120"]
+    environment:
+      HOME: /home/node
+      SQS_QUEUE_URL: ${SQS_QUEUE_URL:?set SQS_QUEUE_URL in .env}
+      AWS_REGION: ${AWS_REGION:-us-east-2}
+      AWS_PROFILE: ${VERIFY_AWS_PROFILE:-${AWS_PROFILE:-skybook}}
+      AWS_SDK_LOAD_CONFIG: "1"
+    volumes:
+      - ${USERPROFILE:-${HOME}}/.aws:/home/node/.aws

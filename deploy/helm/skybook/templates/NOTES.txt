@@ -1,0 +1,5 @@
+SkyBook installed.
+
+  kubectl -n {{ .Release.Namespace }} get pods
+  kubectl -n {{ .Release.Namespace }} port-forward svc/skybook-gateway 8080:8080
+  then open http://localhost:8080/docs

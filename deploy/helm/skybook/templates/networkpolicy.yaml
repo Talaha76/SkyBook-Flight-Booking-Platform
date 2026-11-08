@@ -1,0 +1,17 @@
+{{- if .Values.networkPolicy.enabled }}
+# Internal services accept traffic only from the gateway (and Prometheus scraping inside the namespace).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: skybook-internal-only
+  labels: {{- include "skybook.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - { key: app.kubernetes.io/name, operator: In, values: [flight-search, booking, inventory, payment, notification] }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app.kubernetes.io/name: gateway } }
+        - podSelector: { matchLabels: { app.kubernetes.io/name: prometheus } }
+{{- end }}

@@ -1,0 +1,19 @@
+{
+  "name": "skybook-aws-blueprint",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AWS CDK blueprint for running SkyBook on AWS (synth only - do not deploy without reading docs/aws-cost-estimate.md)",
+  "scripts": {
+    "build": "tsc",
+    "synth": "tsc && node dist/bin/app.js",
+    "test": "tsc && node dist/test/blueprint.check.js"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "^2.275.0",
+    "constructs": "^10.8.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "typescript": "^5.9.3"
+  }
+}

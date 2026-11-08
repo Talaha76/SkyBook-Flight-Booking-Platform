@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "lib": ["ES2022"],
+    "outDir": "dist",
+    "rootDir": ".",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "sourceMap": true,
+    "types": ["node", "jest"]
+  },
+  "include": ["packages/**/*.ts", "services/**/*.ts", "scripts/**/*.ts"],
+  "exclude": ["node_modules", "dist", "**/*.test.ts", "**/*.itest.ts", "infra"]
+}

@@ -1,0 +1,190 @@
+openapi: 3.0.3
+info:
+  title: SkyBook API (via API Gateway)
+  version: 1.0.0
+  description: |
+    Public REST API of SkyBook. All traffic enters through the gateway on port 8080, which checks JWTs,
+    rate-limits, adds `X-Request-Id`, and routes to the internal services.
+
+    **Try it:** call `POST /auth/login` with `alice` / `skybook`, click **Authorize**, paste the `accessToken`.
+
+    Fake payment tokens: `tok_success` (always succeeds), `tok_fail` (always declined), anything else
+    (fails at `PAYMENT_FAILURE_RATE`). Use an email containing `fail-notify` to demo notification retries + DLQ.
+servers:
+  - url: http://localhost:8080
+tags:
+  - name: Auth
+  - name: Flights
+  - name: Bookings
+  - name: Agent
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Client-generated UUID. Retrying with the same key and body returns the saved response.
+      schema: { type: string, format: uuid }
+  schemas:
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+        details: {}
+    Flight:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        flightNumber: { type: string, example: SB100 }
+        airline: { type: string }
+        origin: { type: string, example: YYZ }
+        destination: { type: string, example: YVR }
+        departureDate: { type: string, format: date }
+        departureTime: { type: string, format: date-time }
+        arrivalTime: { type: string, format: date-time }
+        priceCents: { type: integer, example: 34900 }
+        totalSeats: { type: integer }
+        seatsAvailable: { type: integer }
+    CreateBooking:
+      type: object
+      required: [flightId, passengerName, passengerEmail, paymentToken]
+      properties:
+        flightId: { type: string, format: uuid }
+        passengerName: { type: string, example: Alice Martin }
+        passengerEmail: { type: string, format: email, example: alice@example.com }
+        paymentToken: { type: string, example: tok_success }
+    Booking:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        userId: { type: string, format: uuid }
+        flightId: { type: string, format: uuid }
+        passengerName: { type: string }
+        passengerEmail: { type: string }
+        status: { type: string, enum: [PENDING, SEAT_HELD, CONFIRMED, REJECTED, CANCELLED] }
+        amountCents: { type: integer, nullable: true }
+        failureReason: { type: string, nullable: true, example: CARD_DECLINED }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+paths:
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Get a JWT for a demo user (alice, bob = CUSTOMER; agent = AGENT)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string, example: alice }
+                password: { type: string, example: skybook }
+      responses:
+        '200':
+          description: Token issued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accessToken: { type: string }
+                  tokenType: { type: string, example: Bearer }
+                  expiresIn: { type: integer, example: 3600 }
+        '401': { description: Bad credentials, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+  /flights/search:
+    get:
+      tags: [Flights]
+      summary: Search flights by route and date (Redis cache-aside, 60 s TTL)
+      parameters:
+        - { name: origin, in: query, required: true, schema: { type: string, example: YYZ } }
+        - { name: destination, in: query, required: true, schema: { type: string, example: YVR } }
+        - { name: date, in: query, required: true, schema: { type: string, format: date } }
+      responses:
+        '200':
+          description: Matching flights ordered by departure time. `X-Cache` header is HIT, MISS or BYPASS.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  count: { type: integer }
+                  flights: { type: array, items: { $ref: '#/components/schemas/Flight' } }
+        '400': { description: Validation error }
+  /flights/{id}:
+    get:
+      tags: [Flights]
+      summary: Get one flight
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200': { description: Flight, content: { application/json: { schema: { $ref: '#/components/schemas/Flight' } } } }
+        '404': { description: Not found }
+  /airports:
+    get:
+      tags: [Flights]
+      summary: List airports
+      responses: { '200': { description: Airports } }
+  /bookings:
+    post:
+      tags: [Bookings]
+      summary: Create a booking (idempotent). Starts the saga; poll GET /bookings/{id} for the outcome.
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/CreateBooking' } } }
+      responses:
+        '201': { description: "Booking accepted (PENDING). Replays carry header Idempotent-Replayed=true.", content: { application/json: { schema: { $ref: '#/components/schemas/Booking' } } } }
+        '400': { description: Validation error or missing/invalid Idempotency-Key }
+        '401': { description: Not authenticated }
+        '409': { description: Same key still in progress; retry after `Retry-After` seconds }
+        '422': { description: Key reused with a different request body }
+    get:
+      tags: [Bookings]
+      summary: List bookings (customers see their own; agents see all, optional userId filter)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, default: 20, maximum: 100 } }
+        - { name: status, in: query, schema: { type: string } }
+        - { name: userId, in: query, schema: { type: string, format: uuid } }
+      responses: { '200': { description: Bookings } }
+  /bookings/{id}:
+    get:
+      tags: [Bookings]
+      summary: Get a booking (owner or AGENT)
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200': { description: Booking, content: { application/json: { schema: { $ref: '#/components/schemas/Booking' } } } }
+        '403': { description: Not your booking }
+        '404': { description: Not found }
+  /inventory/{flightId}:
+    get:
+      tags: [Agent]
+      summary: Seat inventory and hold counts for a flight (AGENT only)
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: flightId, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses: { '200': { description: Inventory }, '403': { description: Agents only } }
+  /payments/{bookingId}:
+    get:
+      tags: [Agent]
+      summary: Mock payment record for a booking (AGENT only)
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: bookingId, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses: { '200': { description: Payment }, '403': { description: Agents only } }
+  /notifications:
+    get:
+      tags: [Agent]
+      summary: Notification log (AGENT only)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: bookingId, in: query, schema: { type: string, format: uuid } }
+        - { name: status, in: query, schema: { type: string, enum: [SENT, RETRYING, DEAD] } }
+      responses: { '200': { description: Notifications } }
+  /health:
+    get: { summary: Liveness, responses: { '200': { description: ok } } }
+  /metrics:
+    get: { summary: Prometheus metrics, responses: { '200': { description: text exposition format } } }
