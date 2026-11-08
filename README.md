@@ -74,28 +74,6 @@ All results were produced by the project's own test and benchmark scripts (`scri
 
 ---
 
-## Screenshots
-
-<!-- Add your screenshots to docs/images/ with these file names, then they will appear here. -->
-
-### Grafana Monitoring Dashboard
-
-![SkyBook Grafana dashboard](docs/images/grafana-dashboard.png)
-
-*Request rate, p95 latency, 5xx errors, and search cache hit rate per service during a benchmark run.*
-
-### Swagger API Documentation
-
-![SkyBook Swagger UI](docs/images/swagger-ui.png)
-
-*Interactive OpenAPI documentation served by the API gateway at `/docs`.*
-
-### End-to-End Test Run
-
-![SkyBook e2e results](docs/images/e2e-passed.png)
-
-*The 23-check end-to-end suite: search, auth, idempotency, saga confirmation, compensation, and notifications.*
-
 ### Kubernetes Deployment
 
 ![SkyBook pods running on Kubernetes](docs/images/kubernetes-pods.png)
