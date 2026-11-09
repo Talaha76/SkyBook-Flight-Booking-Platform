@@ -6,6 +6,8 @@
 
 [![Node.js](https://img.shields.io/badge/Node.js-22-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![Java](https://img.shields.io/badge/Java-21-ED8B00?logo=openjdk&logoColor=white)](https://openjdk.org/)
+[![Spring Boot](https://img.shields.io/badge/Spring_Boot-3-6DB33F?logo=springboot&logoColor=white)](https://spring.io/projects/spring-boot)
 [![Apache Kafka](https://img.shields.io/badge/Apache_Kafka-KRaft-231F20?logo=apachekafka&logoColor=white)](https://kafka.apache.org/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![Redis](https://img.shields.io/badge/Redis-Cache-DC382D?logo=redis&logoColor=white)](https://redis.io/)
@@ -38,6 +40,7 @@
 - [Search & Caching Flow](#search--caching-flow)
 - [Reliability Patterns](#reliability-patterns)
 - [Kafka → AWS SQS Bridge](#kafka--aws-sqs-bridge)
+- [Inventory in Java / Spring Boot](#inventory-in-java--spring-boot)
 - [Kubernetes Deployment](#kubernetes-deployment)
 - [AWS Production Blueprint](#aws-production-blueprint)
 - [API Overview](#api-overview)
@@ -52,11 +55,11 @@
 
 ---
 
-SkyBook is a flight-booking back end built as **Node.js/TypeScript microservices** that communicate through **Apache Kafka**. Every service owns its own **PostgreSQL** database, flight search is cached in **Redis**, and bookings run through a **choreographed saga** that holds a seat, charges a (mock) payment, and automatically **releases the seat when payment fails**.
+SkyBook is a flight-booking back end built as **Node.js/TypeScript microservices** that communicate through **Apache Kafka**, with the Inventory service also implemented in **Java 21 / Spring Boot** as a drop-in replacement. Every service owns its own **PostgreSQL** database, flight search is cached in **Redis**, and bookings run through a **choreographed saga** that holds a seat, charges a (mock) payment, and automatically **releases the seat when payment fails**.
 
 The project focuses on the problems real booking systems have to solve: duplicate requests, overbooking, lost events, partial failures, traffic spikes, and integrating on-premises event streams with **AWS-native services**.
 
-> **Portfolio project:** SkyBook demonstrates microservice architecture, idempotent REST APIs, the transactional outbox pattern, sagas with compensation, duplicate-safe consumers, query tuning, cache invalidation, retry/dead-letter queues, a Kafka → Amazon SQS bridge, Kubernetes deployment, and Prometheus/Grafana monitoring — with **every number below measured, not estimated**.
+> **Portfolio project:** SkyBook demonstrates microservice architecture, idempotent REST APIs, the transactional outbox pattern, sagas with compensation, duplicate-safe consumers, query tuning, cache invalidation, retry/dead-letter queues, a Kafka → Amazon SQS bridge, a polyglot (Node.js + Java/Spring Boot) service swap, Kubernetes deployment, and Prometheus/Grafana monitoring — with **every number below measured, not estimated**.
 
 ## Measured Results
 
@@ -71,6 +74,7 @@ All results were produced by the project's own test and benchmark scripts (`scri
 | **10× booking spike** (5/s → 50/s) | 3,575 bookings, 17,875 events, **0 lost messages**, 0% errors, all consumers caught up in 161 s |
 | Kafka → **real Amazon SQS** through a **2-minute network outage** | **1,200 / 1,200 events delivered**, backlog drained in 21 s |
 | Kubernetes (kind + Helm) | 13 pods running, **23/23 end-to-end checks passed** |
+| Inventory swapped to **Java 21 / Spring Boot** (no other service changed) | **23/23 end-to-end checks passed**; 200 holds on 150 seats → **150 / 50** for both lock strategies (618 ms pessimistic, 479 ms optimistic) |
 
 ---
 
@@ -88,6 +92,7 @@ All results were produced by the project's own test and benchmark scripts (`scri
 - **Kafka → AWS SQS bridge** that commits offsets only after AWS confirms and pauses during outages.
 - **JWT authentication** with `CUSTOMER` / `AGENT` roles, Redis rate limiting, and request IDs traced end to end.
 - **Prometheus metrics + Grafana dashboard + alert rules** for latency, consumer lag, outbox backlog, and DLQ growth.
+- **Two Inventory implementations** — Node.js/TypeScript and **Java 21 / Spring Boot**, interchangeable with one Compose override or one Helm value.
 - **Docker Compose** for local development, **Helm chart** for Kubernetes, **AWS CDK blueprint** for production.
 
 ---
@@ -129,6 +134,8 @@ All results were produced by the project's own test and benchmark scripts (`scri
         Prometheus scrapes /metrics on every service ──▶ Grafana dashboard + alerts
 ```
 
+The Inventory box can be either the Node.js service or the Java/Spring Boot one; both use the same topics, consumer group, tables, and HTTP API.
+
 **Rule:** no service reads another service's database. Services communicate only through Kafka events; external clients go through the gateway.
 
 | Service | Responsibility | Owns |
@@ -136,7 +143,7 @@ All results were produced by the project's own test and benchmark scripts (`scri
 | **Gateway** | JWT auth, roles, rate limiting, request IDs, routing, OpenAPI | – |
 | **Flight Search** | Search by route and date (read-heavy) | `flights`, `airports`, Redis cache |
 | **Booking** | Idempotent booking API, saga state machine | `bookings`, `idempotency_keys`, `outbox_events` |
-| **Inventory** | Seat holds, overbooking prevention, hold expiry | `seat_inventory`, `seat_holds` |
+| **Inventory** (Node.js or Java) | Seat holds, overbooking prevention, hold expiry | `seat_inventory`, `seat_holds` |
 | **Payment** | Mock provider with configurable delay and failure rate | `payments` |
 | **Notification** | Confirmation/cancellation messages, retries, DLQ | `notifications` |
 | **AWS Bridge** | Forwards booking events to Amazon SQS without loss | Kafka offsets (checkpoint) |
@@ -184,6 +191,16 @@ Seat holds expire after 10 minutes; a sweeper releases expired holds and cancels
 - prom-client (Prometheus metrics)
 - jsonwebtoken (JWT)
 
+### Inventory (Java implementation)
+
+- Java 21
+- Spring Boot 3.2 (Web, JDBC, Actuator)
+- Spring Kafka
+- JdbcTemplate + Flyway
+- Micrometer (Prometheus)
+- Logback + Logstash encoder (JSON logs)
+- Maven
+
 ### Data & Messaging
 
 - Apache Kafka 3.8 (KRaft mode, no ZooKeeper)
@@ -201,6 +218,7 @@ Seat holds expire after 10 minutes; a sweeper releases expired holds and cancels
 ### Testing
 
 - Jest & ts-jest
+- JUnit 5, Mockito & Testcontainers (Java)
 - PostgreSQL integration tests (Testcontainers supported)
 - k6 load tests
 - End-to-end test suite through the gateway
@@ -220,6 +238,7 @@ SkyBook-Flight-Booking-Platform/
 │   ├── flight-search/       # search, Redis cache, read model
 │   ├── booking/             # idempotency, saga state machine
 │   ├── inventory/           # seat holds, locking, expiry sweeper
+│   ├── inventory-java/      # same service in Java 21 / Spring Boot (Maven)
 │   ├── payment/             # mock payment provider
 │   ├── notification/        # retry topics, DLQ
 │   └── aws-bridge/          # Kafka → Amazon SQS
@@ -241,6 +260,7 @@ SkyBook-Flight-Booking-Platform/
 ├── docs/                    # architecture, results, benchmarks, failure tests, AWS, Kubernetes
 ├── docker-compose.yml
 ├── docker-compose.aws.yml   # real-AWS override for the bridge
+├── docker-compose.java.yml  # swap in the Java Inventory service
 ├── Dockerfile
 └── README.md
 ```
@@ -401,6 +421,31 @@ Real-AWS setup: [`docs/aws-setup.md`](docs/aws-setup.md).
 
 ---
 
+## Inventory in Java / Spring Boot
+
+`services/inventory-java` is a second implementation of the Inventory service in **Java 21 and Spring Boot 3**. It is a **drop-in replacement**: same port, environment variables, tables, Kafka topics and consumer group, event envelope, HTTP API, and Prometheus metric names, so no other service changes when it is swapped in.
+
+| Concern | Node.js version | Java / Spring Boot version |
+|---|---|---|
+| Overbooking prevention | `SELECT … FOR UPDATE` / versioned `UPDATE` | the same SQL through `JdbcTemplate` |
+| Dedupe + seat change + outbox row in one transaction | `withTx` | `@Transactional` service in its own bean (called through the Spring proxy) |
+| Offsets committed only after the DB commit | KafkaJS manual commit | Spring Kafka `MANUAL_IMMEDIATE` ack after the transaction returns |
+| Retry without skipping records | consumer retry loop | `DefaultErrorHandler` with exponential backoff |
+| Outbox publisher and hold sweeper | timers | `@Scheduled` beans (`FOR UPDATE SKIP LOCKED`) |
+| Schema | migrations on start-up | Flyway with `baseline-on-migrate` on the existing tables |
+| Metrics | prom-client | Micrometer, exported under the same names (+ JVM metrics) |
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.java.yml up --build -d                         # swap in Java
+docker compose -f docker-compose.yml -f docker-compose.java.yml --profile tools run --rm e2e          # 23 checks
+docker compose -f docker-compose.yml -f docker-compose.java.yml --profile tools run --rm tests-java   # mvn verify
+docker compose up -d --force-recreate inventory                                                       # back to Node
+```
+
+**Verified:** the unchanged e2e suite passed **23/23** with the Java service; `mvn verify` passed **21 unit + 8 integration tests** against real PostgreSQL and Kafka, including 200 concurrent holds on a 150-seat flight (**150 held / 50 rejected**, both strategies) and a Kafka round trip where a redelivered event is detected as a duplicate. On Kubernetes, the implementation is a Helm value: `--set inventory.implementation=java`. Details: [`docs/java-inventory.md`](docs/java-inventory.md).
+
+---
+
 ## Kubernetes Deployment
 
 The Helm chart in `deploy/helm/skybook` deploys every service (with readiness/liveness probes, non-root containers, Prometheus annotations, a NetworkPolicy, and a seed Job). With default values it also runs dev-only Kafka, PostgreSQL, and Redis inside the cluster.
@@ -412,7 +457,7 @@ helm install skybook ./deploy/helm/skybook --namespace skybook --create-namespac
 kubectl -n skybook get pods
 ```
 
-Verified on kind: **13 pods running, 23/23 end-to-end checks passed** against the cluster. Details: [`docs/kubernetes.md`](docs/kubernetes.md).
+Verified on kind: **13 pods running, 23/23 end-to-end checks passed** against the cluster. `inventory.implementation: node | java` selects the Inventory image (the Java pod gets a startup probe and a larger memory limit). Details: [`docs/kubernetes.md`](docs/kubernetes.md).
 
 ---
 
@@ -474,7 +519,7 @@ Every service exposes `/metrics` for Prometheus:
 - `dlq_messages_total`
 - `bridge_forwarded_total`, `bridge_paused`, `bridge_end_to_end_seconds`
 
-The provisioned **Grafana dashboard** shows request rate, p95 latency, 5xx errors, cache hit rate, consumer lag, outbox backlog, consumed events, notifications/DLQ, and bridge throughput.
+The provisioned **Grafana dashboard** shows request rate, p95 latency, 5xx errors, cache hit rate, consumer lag, outbox backlog, consumed events, notifications/DLQ, bridge throughput, and Inventory heap usage (JVM or Node).
 
 **Alert rules:** DLQ growth, outbox backlog, high consumer lag, bridge paused, service down.
 
@@ -507,11 +552,15 @@ The spike test also exposed the system's bottleneck: the **payment consumer** (a
 ```bash
 docker compose --profile tools run --rm tests   # 31 unit + 9 integration tests
 docker compose --profile tools run --rm e2e     # 23 end-to-end checks
+
+# Java Inventory: 21 unit + 8 integration tests (JUnit 5, Mockito, real PostgreSQL + Kafka)
+docker compose -f docker-compose.yml -f docker-compose.java.yml --profile tools run --rm tests-java
 ```
 
 - **Unit tests:** idempotency branches (mocked repository), request hashing, the saga state machine, retry routing, the mock payment provider, JWT auth, search validation, and the AWS bridge (partial failures, outages).
 - **Integration tests (real PostgreSQL):** 50-request idempotency race, saved-response replay, overbooking with both lock strategies, duplicate event delivery, compensation, hold expiry.
 - **End-to-end:** the full saga through the gateway, including payment failure compensation and authorization rules.
+- **Java Inventory:** handler outcomes with Mockito; the overbooking test for both strategies, duplicate delivery, compensation, hold expiry, the HTTP contract, and a full Kafka round trip.
 - **Load:** k6 scripts in `load-tests/`.
 
 ---
@@ -569,7 +618,7 @@ SkyBook is a portfolio project, not a production airline system.
 - Authentication uses three built-in demo users (HS256 JWTs); production would use an identity provider with RS256/JWKS.
 - The payment provider is a mock with configurable delay and failure rate — no real card data is handled.
 - Locally, one PostgreSQL server hosts all service databases (schemas remain fully isolated).
-- Kubernetes was verified on kind (local), and the AWS blueprint is synthesized but not deployed.
+- Kubernetes was verified on kind (local), and the AWS blueprint is synthesized but not deployed. The Java Inventory was verified with Docker Compose; its Helm toggle is rendered but not yet installed on kind.
 - If a seat hold expires *and* the payment later succeeds, there is no automatic refund step (payment rejects expired holds, which narrows the window).
 - Benchmark numbers come from a single developer machine and are not production-scale figures.
 
@@ -583,6 +632,7 @@ Possible extensions include:
 - OpenTelemetry tracing into Jaeger,
 - Kafka Schema Registry with Avro/Protobuf event schemas,
 - consumer-lag-driven autoscaling (KEDA),
+- a k6 throughput comparison of the Node.js and Java Inventory services,
 - concurrent payment processing within a partition,
 - a refund step for late payments on expired holds,
 - contract tests between services (Pact),
@@ -596,6 +646,6 @@ SkyBook was built to demonstrate how a booking system can stay **correct under c
 
 The project combines:
 
-**Microservices + Event Streaming + Idempotent APIs + Sagas + Caching + AWS Integration + Kubernetes + Monitoring**
+**Microservices + Event Streaming + Idempotent APIs + Sagas + Caching + AWS Integration + Node.js & Java/Spring Boot + Kubernetes + Monitoring**
 
 into one end-to-end, fully tested flight-booking platform.
