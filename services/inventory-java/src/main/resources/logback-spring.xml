@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- JSON logs (one object per line) with requestId / eventId / bookingId from the MDC, like the Node services' pino logs. -->
+<configuration>
+  <appender name="JSON" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+      <customFields>{"service":"inventory","impl":"java"}</customFields>
+      <fieldNames>
+        <timestamp>time</timestamp>
+        <message>msg</message>
+        <version>[ignore]</version>
+        <levelValue>[ignore]</levelValue>
+      </fieldNames>
+    </encoder>
+  </appender>
+  <root level="INFO">
+    <appender-ref ref="JSON"/>
+  </root>
+</configuration>

@@ -7,3 +7,5 @@ cdk.out/
 infra/aws-blueprint/dist/
 load-tests/results/*.json
 load-tests/results/RESULTS.md
+services/inventory-java/target
+target/

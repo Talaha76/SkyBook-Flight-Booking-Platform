@@ -22,6 +22,17 @@ connections:
 
 logLevel: info
 
+# Which Inventory implementation to deploy. Both use the same env vars, tables, topics and HTTP API.
+#   helm upgrade skybook deploy/helm/skybook --reuse-values --set inventory.implementation=java
+inventory:
+  implementation: node        # node | java
+  javaImage:
+    repository: skybook-inventory-java
+    tag: latest
+  javaResources:              # the JVM needs more memory than Node
+    requests: { cpu: 100m, memory: 384Mi }
+    limits: { cpu: "1", memory: 768Mi }
+
 serviceAccount:
   # IRSA on EKS: eks.amazonaws.com/role-arn: <AppRoleArn CDK output>
   annotations: {}

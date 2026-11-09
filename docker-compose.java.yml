@@ -1,0 +1,45 @@
+# Swap the Node Inventory service for the Java/Spring Boot one. Nothing else changes.
+#   docker compose -f docker-compose.yml -f docker-compose.java.yml up --build -d
+#   docker compose -f docker-compose.yml -f docker-compose.java.yml --profile tools run --rm e2e
+#   docker compose -f docker-compose.yml -f docker-compose.java.yml --profile tools run --rm tests-java   # mvn verify
+# Back to Node:  docker compose up -d --force-recreate inventory
+services:
+  inventory:
+    image: skybook-inventory-java:latest
+    build:
+      context: ./services/inventory-java
+    command: []          # the image's ENTRYPOINT starts the jar
+    mem_limit: 768m
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:-dev-internal-token}
+      PORT: 3003
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/skybook_inventory
+      INVENTORY_LOCK_STRATEGY: ${INVENTORY_LOCK_STRATEGY:-pessimistic}
+      SEAT_HOLD_TTL_SECONDS: ${SEAT_HOLD_TTL_SECONDS:-600}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3003/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+
+  # Unit + integration tests (JUnit 5, Mockito, real Postgres and Kafka from this stack).
+  tests-java:
+    image: maven:3.9-eclipse-temurin-21
+    profiles: ["tools"]
+    restart: "no"
+    working_dir: /src
+    command: ["mvn", "-B", "verify"]
+    volumes:
+      - ./services/inventory-java:/src
+      - m2cache:/root/.m2
+    environment:
+      TEST_DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/skybook_test
+      TEST_KAFKA_BROKERS: kafka:9092
+    depends_on:
+      postgres: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+
+volumes:
+  m2cache:

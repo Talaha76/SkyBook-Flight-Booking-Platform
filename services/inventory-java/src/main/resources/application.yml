@@ -1,0 +1,65 @@
+# Same environment variables as the Node Inventory service (services/inventory), so either can run.
+server:
+  port: ${PORT:3003}
+  shutdown: graceful
+
+spring:
+  application:
+    name: inventory
+  main:
+    banner-mode: "off"
+  kafka:
+    bootstrap-servers: ${KAFKA_BROKERS:localhost:9092}
+    consumer:
+      group-id: ${KAFKA_CONSUMER_GROUP:inventory}
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    producer:
+      acks: all
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      properties:
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 5
+    listener:
+      ack-mode: manual_immediate
+  flyway:
+    # The Node seed job may already have created these tables: baseline instead of failing,
+    # and let V1 (all CREATE ... IF NOT EXISTS) run anyway so every table is guaranteed to exist.
+    baseline-on-migrate: true
+    baseline-version: 0
+    locations: classpath:db/migration
+
+skybook:
+  database-url: ${DATABASE_URL:postgres://postgres:postgres@localhost:5432/skybook_inventory}
+  internal-token: ${INTERNAL_TOKEN:dev-internal-token}
+  lock-strategy: ${INVENTORY_LOCK_STRATEGY:pessimistic}
+  hold-ttl-seconds: ${SEAT_HOLD_TTL_SECONDS:600}
+  hold-sweep-interval-ms: ${HOLD_SWEEP_INTERVAL_MS:15000}
+  db-pool-max: ${DB_POOL_MAX:10}
+  outbox-poll-ms: ${OUTBOX_POLL_MS:200}
+  kafka-concurrency: ${KAFKA_PARTITIONS_CONCURRENCY:3}
+  kafka-partitions: ${KAFKA_PARTITIONS:3}
+  consumer-group: ${KAFKA_CONSUMER_GROUP:inventory}
+  topics:
+    booking: ${TOPIC_BOOKING:booking.events}
+    inventory: ${TOPIC_INVENTORY:inventory.events}
+    payment: ${TOPIC_PAYMENT:payment.events}
+
+management:
+  # Our own controllers serve /health, /ready and /metrics (same paths as the Node services);
+  # actuator is only used for its Micrometer/Prometheus auto-configuration.
+  endpoints:
+    web:
+      exposure:
+        include: ""
+  metrics:
+    tags:
+      service: inventory
+
+logging:
+  level:
+    root: INFO
+    org.apache.kafka: WARN

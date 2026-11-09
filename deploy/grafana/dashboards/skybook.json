@@ -363,6 +363,73 @@
           }
         }
       ]
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Inventory runtime: heap used (JVM when the Java service runs, Node otherwise)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 40
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "GC pause s/s (java)"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(jvm_memory_used_bytes{service=\"inventory\",area=\"heap\"})",
+          "legendFormat": "JVM heap (java)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "sum(nodejs_heap_size_used_bytes{service=\"inventory\"})",
+          "legendFormat": "V8 heap (node)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "refId": "C",
+          "expr": "sum(rate(jvm_gc_pause_seconds_sum{service=\"inventory\"}[1m]))",
+          "legendFormat": "GC pause s/s (java)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ]
     }
   ]
 }

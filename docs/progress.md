@@ -44,6 +44,24 @@ Kafka wire protocol. Production Compose uses the official `apache/kafka:3.8.0` i
 | k6 measured results on the owner's machine | ✅ | docs/results-2026-11-07.md: search 1,021 → 25.5 ms p95, 89 % hit rate; race 100 → 1 booking; 10× spike 0 lost |
 | EventBridge variant, OpenTelemetry → Jaeger (stretch) | ⬜ | out of scope for now |
 
+## Phase 3: Inventory service in Java / Spring Boot
+
+| Item | Status | Verification |
+|---|---|---|
+| `services/inventory-java`: Spring Boot 3.2, Java 21, JdbcTemplate, Flyway (baseline-on-migrate), Spring Kafka (manual ack after commit, exponential-backoff error handler), `@Scheduled` outbox publisher + hold sweeper, Micrometer with the Node metric names, JSON logs | ✅ | built in Docker on the owner's machine (2026-11-08) |
+| Unit tests: 4 classes, 21 tests (Mockito) | ✅ | owner's machine: **21/21 passed** |
+| Integration tests: overbooking 200/150 × both strategies, dedupe/compensation/confirm/sweeper/HTTP contract, Kafka round trip | ✅ | owner's machine, real Postgres + Kafka: **8/8 passed**; pessimistic 200 holds / 150 seats in 618 ms → 150 / 50, optimistic in 479 ms → 150 / 50; redelivered BookingRequested logged `result=duplicate` |
+| `Dockerfile`, `docker-compose.java.yml` (swap + `tests-java`) | ✅ | owner's machine: all containers healthy with the Java inventory |
+| **Drop-in proof: unchanged e2e suite with the Java service** | ✅ | owner's machine: **23/23 checks passed** |
+| Helm `inventory.implementation: node \| java` (image, no node command, startup probe, 768 Mi) | 🟡 | rendered for both values; not yet installed on kind |
+| CI job `inventory-java` (`mvn verify` + image build) | 🟡 | written, not run |
+| Grafana panel: inventory heap (JVM or Node) + GC pause | 🟡 | added to the dashboard JSON; not viewed |
+| Optional: k6 booking burst, Node vs Java | ⬜ | not run |
+
+Bug found on the first real run: Spring Boot tests disable metrics export by default, so the `/metrics` controller's
+required `PrometheusMeterRegistry` was missing and every integration test failed at start-up. Fixed by making the
+registry optional in the controller and enabling metrics in the tests with `@AutoConfigureObservability`.
+
 ## Known limitations
 
 - Demo authentication (three built-in users, HS256). A production setup would use an IdP with RS256/JWKS.
